@@ -12,6 +12,7 @@ import math
 import random
 import multiprocessing
 import json
+from collections import Counter, defaultdict
 
 from scipy.optimize import minimize
 
@@ -51,7 +52,7 @@ def simple_dERC_LDN_test():
     L1 = [language
           for language in full_set['IE'] if language.name == 'ENGLISH'][0]
     L2 = [instance
-          for instance in full_set['IE'] if instance.name == 'STANDARD_GERMAN'][0]
+          for instance in full_set['IE'] if instance.name == 'SWEDISH'][0]
 
     print(calculate_dERC_LDN(L1, L2))
 
@@ -93,11 +94,15 @@ def load_sets():
     return training_set, test_set
 
 
-# NOTE: NOW, my num_alignments (BOTH) counts valid (non '-') AND INVALID ones. I will have to test.
+# NOTE:
 def objective_function(x):
     open_gap_score = x[0]
     extend_gap_score = x[1]
     theta_pmi = x[2]
+
+    # make sure non-positive
+    if open_gap_score > 0 or extend_gap_score > 0:
+        return 1
 
     # training_set, test_set are defined
     # potential_cognates is defined
@@ -111,7 +116,7 @@ def objective_function(x):
         char_counts, num_characters,
         default_pmi_matrix.copy(), 11)  # 11 since the first is not re-estimating using probable cognates, its generating probable cognates for the first time.
 
-    # score the 1,000 random pairs
+    # score the 1,000 random pairs with PMI
     total_score = 0
     for related_pair in random_probably_related_language_pairs:
         total_score += calculate_dERC_PMI(
@@ -138,7 +143,7 @@ if __name__ == '__main__':
     # reset probably_related_languages
     """
     probably_related_languages = get_related_languages(
-        training_set, test_set, theta_dERC=0.70)
+        training_set, test_set, theta_dERC=0.65)
 
     # Convert the list of tuples of Language objects to a JSON-serializable format
     serialized_data = [((language1.__dict__, language2.__dict__), )
@@ -167,8 +172,6 @@ if __name__ == '__main__':
     with open("./materials/potential_cognates.json", 'r') as file:
         potential_cognates = json.load(file)
 
-    aligned_cognates = align.align_default(potential_cognates)
-
     # count: number of characters in training_list
     # count: p, b, f, v, m, w, 8, 4, t, d, s, z, c, n, r, l, S, Z, C, j, T, 5, y, k, g, x, N, q, G, X, h, 7, L, !, i, e, E, 3, a, u, o
     chars = ['p', 'b', 'f', 'v', 'm', 'w', '8', '4', 't', 'd', 's', 'z', 'c', 'n', 'r', 'l', 'S', 'Z', 'C', 'j',
@@ -188,35 +191,54 @@ if __name__ == '__main__':
                             char_counts[char] += 1
     # now we have num_characters and char_counts
 
+    # align using levenshtein (default needleman-wunsch)
+    aligned_cognates = [align.levenshtein_align(
+        potential_pair) for potential_pair in potential_cognates]
+
     # count: number of alignments total in aligned_cognates
     # count: each type of non-gap alignment in aligned_cognates
     num_alignments = 0
-    valid_alignments_count = {}
+    valid_alignments_count = Counter()
     for aligned1, aligned2 in aligned_cognates:
         for char1, char2 in zip(aligned1, aligned2):
-            num_alignments += 1
+
             # get valid alignments
             if char1 == '-' or char2 == '-':
                 continue
 
+            # just valid alignments
+            num_alignments += 1
+
             # make sure they are in sorted order
-            char1, char2 = sorted([char1, char2])
+            sorted_c1, sorted_c2 = tuple(sorted([char1, char2]))
 
             # Update the count in the dictionary
-            valid_alignments_count[(char1, char2)] = \
-                valid_alignments_count.get((char1, char2), 0) + 1
+            valid_alignments_count[(sorted_c1, sorted_c2)] += 1
 
     # now we have num_valid_alignments and valid_alignments_count
-
     default_pmi_matrix = {}
-    for (alignment_char1, alignment_char2), alignment_count in valid_alignments_count.items():
-        default_pmi_matrix[(alignment_char1, alignment_char2)] = math.log((alignment_count / num_alignments) /
-                                                                          (
-            (char_counts[alignment_char1] / num_characters)
-            * (char_counts[alignment_char2] / num_characters)
-        ))
+    for char1 in chars:
+        for char2 in chars:
+            sorted_c1, sorted_c2 = tuple(sorted([char1, char2]))
+            if default_pmi_matrix.get((sorted_c1, sorted_c2)):
+                continue
+            s_ab = (valid_alignments_count[(
+                sorted_c1, sorted_c2)] / num_alignments)
+            q_a, q_b = (
+                (char_counts[char1] / num_characters),
+                (char_counts[char2] / num_characters)
+            )
+            if s_ab == 0:  # frequency of alignments is 0 (never aligned)
+                #               common for characters like '!', 'X', etc.
+                # basically, just assume one does happen
+                s_ab = 1
+                q_a += 1
+                q_b += 1
 
-    """# pick my 1,000 matrices
+            default_pmi_matrix[(sorted_c1, sorted_c2)] = \
+                math.log(s_ab / (q_a * q_b))
+
+    # pick my 1,000 matrices
     random_probably_related_language_pairs = random.sample(
         probably_related_languages, 1000)
 
@@ -226,14 +248,14 @@ if __name__ == '__main__':
         total_score += calculate_dERC_LDN(related_pair[0], related_pair[1])
     print(total_score / 1000)
 
-    # now actually optimize it bud.
+    # now actually optimize it.
     # initial guesses
     initial_guesses = [
-        [-2.5, -1.8, 4.5],
+        [-2.5, -1.7, 4.4],
         [-2.0, -1.0, 7.0],
         [-1.0, -0.5, 5.5],
         [-2.5, -1.8, 3.0],
-        [-3.0, -2.0, 2.0],
+        [-3.0, -2.0, 10.0],
     ]
 
     result = minimize(objective_function,
@@ -247,11 +269,13 @@ if __name__ == '__main__':
     optimal_value = result.fun
 
     print("Optimized Parameters: ", optimal_params)
-    print("Objective Function Value: ", optimal_value)"""
+    print("Objective Function Value: ", optimal_value)
 
     # get it using values generated previously
     pmi_matrix = pmi_matrix_generator.reestimate_pmi_matrix(potential_cognates,
-                                                            -2.4166728, -1.51569227, 5.59488733,
+                                                            optimal_params[0],
+                                                            optimal_params[1],
+                                                            optimal_params[2],
                                                             char_counts, num_characters,
                                                             default_pmi_matrix, 11)
     print(pmi_matrix)

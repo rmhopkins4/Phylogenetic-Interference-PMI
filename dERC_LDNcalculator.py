@@ -69,6 +69,7 @@ def calculate_dERC_LDN(L1: Language, L2: Language) -> float:
 
     # NOTE: this should never prock
     if N == 0:
+        print("ERROR")
         return 1
 
     ER = -sum(math.log(normalized_rank)
